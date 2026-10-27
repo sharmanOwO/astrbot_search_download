@@ -1,8 +1,7 @@
 """通过soutubot 实现反向搜图和通过 nhentai 下载漫画的工具"""
 
-from __future__ import annotations
-
 import asyncio
+import math
 import os
 import shutil
 import tempfile
@@ -23,7 +22,7 @@ def _positive_float(value: str | None, default: float) -> float:
         parsed = float(value or default)
     except (TypeError, ValueError):
         return default
-    return parsed if parsed > 0 else default
+    return parsed if math.isfinite(parsed) and parsed > 0 else default
 
 
 def _non_negative_int(value: str | None, default: int) -> int:
@@ -36,9 +35,9 @@ def _non_negative_int(value: str | None, default: int) -> int:
 
 @register(
     "astrbot_soutu_download",
-    "local-user",
+    "sharmanOwO",
     "提供 soutubot 反向搜图和 nhentai 漫画 PDF 下载工具。",
-    "1.0.0",
+    "1.1.0",
 )
 class AstrbotSoutuDownloadPlugin(Star):
     def __init__(self, context: Context):
@@ -48,6 +47,8 @@ class AstrbotSoutuDownloadPlugin(Star):
             os.getenv("ASTRBOT_SOUTU_RESULT_LIMIT"),
             10,
         )
+        self.search_settings: dict[tuple[str, str], dict[str, bool | int]] = {}
+        # 会话隔离设定。字典中的元素会形如("群A", "用户1"): {"detail": True, "limit": 3}
         self.download_root = Path(
             os.getenv(
                 "ASTRBOT_NHENTAI_DOWNLOAD_DIR",
@@ -58,6 +59,43 @@ class AstrbotSoutuDownloadPlugin(Star):
             os.getenv("NHENTAI_PDF_PASSWORD", DEFAULT_PDF_PASSWORD)
             or DEFAULT_PDF_PASSWORD
         )
+
+    def _settings_for(self, event: AstrMessageEvent) -> dict[str, bool | int]:
+        """Keep presentation preferences isolated by conversation and sender."""
+        key = (event.unified_msg_origin, event.get_sender_id())
+        return self.search_settings.setdefault(key, {})
+    # setdefault：
+    # 如果字典里有这个键，就返回它对应的值
+    # 如果没有这个键返回默认值
+    # 这里默认值就是空字典
+    @filter.command("detail")
+    async def detail(self, event: AstrMessageEvent, enabled: str = "true"):
+        """切换搜图详细模式：/detail [1/0/true/false]，省略参数即开启。"""
+        value = enabled.strip().lower()
+        if value not in {"1", "0", "true", "false"}:
+            yield event.plain_result(
+                "用法：/detail [1/0/true/false]；不带参数表示开启详细模式喵"
+            )
+        else:
+            active = value in {"1", "true"}
+            self._settings_for(event)["detail"] = active
+            # 用户+会话隔离的情况下，这相当于将
+            # ("群A", "用户1")的 detail 键设置为 true
+            mode = "详细" if active else "简洁"
+            yield event.plain_result(f"现在你在当前会话中的搜图设置为：{mode}模式喵~")
+        event.stop_event()
+
+    @filter.command("page")
+    async def page(self, event: AstrMessageEvent, n: int):
+        """设置搜图展示条数：/page n，只展示本次结果中匹配度最高的前 n 条。"""
+        if n <= 0:
+            yield event.plain_result("用法：/page n，展示匹配度最高的前 n 条喵")
+        else:
+            self._settings_for(event)["limit"] = n
+            yield event.plain_result(
+                f"你在当前会话中的搜图结果将会展示前 {n} 条喵~"
+            )
+        event.stop_event()
 
     @filter.llm_tool(name="soutubot_search_tool")
     async def soutubot_search_tool(
@@ -73,17 +111,31 @@ class AstrbotSoutuDownloadPlugin(Star):
 
         Args:
             strict(boolean): 是否使用更严格的相似度搜索模式。
-            result_limit(number): 最多展示多少条结果，默认使用插件配置值。
+            result_limit(number): 最多展示多少条结果；用户设置过 /page 时优先使用该设置。
         """
         image_path, temporary = await resolve_first_image(event)
         if image_path is None:
-            yield event.plain_result("没有在当前消息或引用消息中找到可用图片。请先发送或引用一张图片。")
+            yield event.plain_result(
+                "需要引用或包含一张图片喵"
+            )
             return
 
-        if not isinstance(result_limit, (int, float)) or result_limit < 0:
+        settings = self._settings_for(event)
+        if "limit" in settings:
+            limit = int(settings["limit"])
+        elif (
+            isinstance(result_limit, bool)
+            or not isinstance(result_limit, (int, float))
+            or not math.isfinite(result_limit)
+            or result_limit < 0
+        ):
             limit = self.result_limit
         else:
             limit = max(0, int(result_limit))
+        detail = bool(settings.get("detail", False))
+        # 如果未发送 /detail
+        # 那么用户对应字典中没有detail键，
+        # get使用默认值False，也就是简洁模式
 
         try:
             payload = await asyncio.to_thread(
@@ -92,7 +144,7 @@ class AstrbotSoutuDownloadPlugin(Star):
                 bool(strict),
                 self.timeout,
             )
-            yield event.plain_result(format_summary(payload, limit))
+            yield event.plain_result(format_summary(payload, limit, detail=detail))
         except (OSError, SearchError, ValueError) as exc:
             logger.warning("soutubot 搜图失败: %s", exc)
             yield event.plain_result(f"搜图失败：{exc}")
@@ -115,7 +167,7 @@ class AstrbotSoutuDownloadPlugin(Star):
             gallery_id(string): nhentai 漫画编号，例如 123456，或 https://nhentai.net/g/123456/。
         """
         if not str(gallery_id).strip():
-            yield event.plain_result("请提供要下载的 nhentai 漫画编号或主页面 URL。")
+            yield event.plain_result("请提供要下载的 nhentai 车牌号喵")
             return
 
         try:
@@ -145,10 +197,7 @@ class AstrbotSoutuDownloadPlugin(Star):
             )
             pdf_path.chmod(0o644)
             chain = [
-                Comp.Plain(
-                    f" {gallery_id} 下载完成。"
-                    f"密码：{self.pdf_password}\n"
-                ),
+                Comp.Plain(f" {gallery_id} 下载完成喵\n密码：{self.pdf_password}喵"),
                 Comp.File(name=pdf_path.name, file=str(pdf_path)),
             ]
             yield event.chain_result(chain)

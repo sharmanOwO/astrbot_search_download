@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
 import shutil
-import sys
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -25,7 +23,7 @@ IMAGE_CDNS = (
 )
 #这里保存了4个url，都是图片CDNurl，但我不确定实际请求时轮询这4个是否有兜底作用，程序中如果i1能用会默认用i1
 
-USER_AGENT = "nhentai-pdf-downloader/1.0 (local command-line client)"
+USER_AGENT = "nhentai-pdf-downloader/1.0 (AstrBot plugin)"
 GALLERY_URL_PATTERN = re.compile(r"^/g/(\d+)/?$")
 SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._ -]+")
 DEFAULT_PDF_PASSWORD = "114514"
@@ -40,7 +38,7 @@ class AuthRequiredError(DownloadError):
 
 
 def gallery_id_from_url(value: str) -> str:
-    '''用于从命令行输入读取gallery_id的函数'''
+    '''从漫画主页 URL 读取 gallery_id'''
     parsed = urlparse(value.strip())
     if parsed.scheme != "https" or parsed.netloc.lower() not in {"nhentai.net", "www.nhentai.net"}:
         raise DownloadError("URL 必须是 https://nhentai.net/g/漫画编号")
@@ -60,8 +58,8 @@ def _read_error_body(exc: HTTPError) -> str:
 def _auth_hint() -> str:
     '''不确定n站是否存在必须登录才能下载的漫画，这个函数用于兜底'''
     return (
-        "服务器要求登录；请使用 --cookie，"
-        "也可以通过设置NHENTAI_COOKIE。"
+        "服务器要求登录；请设置 NHENTAI_COOKIE 环境变量，"
+        "或向 download_pdf 传入 cookie 参数。"
     )
 
 
@@ -355,7 +353,6 @@ def download_gallery(
     image_paths: list[Path] = []
     for index, page_url in enumerate(page_urls, start=1):
         target = image_dir / f"{index:05d}.img"
-        print(f"下载第 {index}/{len(page_urls)} 页...", flush=True)
         errors: list[str] = []  #接下来从i1到i4查找（一般i1可以用就直接用了）
         for candidate_url in _image_url_candidates(page_url):
             try:
@@ -380,22 +377,6 @@ def download_gallery(
     return image_paths, gallery
 
 
-def parse_args() -> argparse.Namespace:    
-    '''命令行参数读取'''
-    parser = argparse.ArgumentParser(description="从 nhentai 下载漫画并生成 PDF。")
-    parser.add_argument("url", help="漫画主页，例如 https://nhentai.net/g/114514")
-    parser.add_argument("--path", required=True, type=Path, help="输出目录，或以 .pdf 结尾的完整文件路径")
-    parser.add_argument("--cookie", help="Cookie 请求头（也可设置 NHENTAI_COOKIE）")
-    parser.add_argument("--cookie-file", type=Path, help="从文件第一行读取 Cookie 请求头")
-    parser.add_argument("--timeout", type=float, default=60, help="单次请求超时秒数（默认 60）")
-    parser.add_argument(
-        "--pdf-password",
-        default=os.environ.get("NHENTAI_PDF_PASSWORD", DEFAULT_PDF_PASSWORD),
-        help="输出 PDF 的打开密码（默认 114514，也可设置 NHENTAI_PDF_PASSWORD）",
-    )
-    return parser.parse_args()
-
-
 def _output_path(path_arg: Path, gallery_id: str, gallery: dict[str, Any]) -> Path:
     expanded = path_arg.expanduser()
     if expanded.suffix.lower() == ".pdf":
@@ -418,10 +399,7 @@ def download_pdf(
     cookie: str | None = None,
     pdf_password: str | None = None,
 ) -> Path:
-    """下载一部漫画并返回生成的 PDF 路径
-    这是供 AstrBot 插件导入调用的接口。下方保留原有 CLI 入口
-    所以仍可作为独立命令行程序使用
-    """
+    """下载一部漫画并返回加密 PDF 路径，供 AstrBot 插件导入调用。"""
     gallery_id = gallery_id_from_value(gallery)
     if timeout <= 0:
         raise DownloadError("timeout must be greater than zero")
@@ -450,40 +428,3 @@ def download_pdf(
         return output_path
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
-
-
-def main() -> int:
-    '''主函数用于读取命令行参数并将pdf下载到本地，不会在导入模块中起作用'''
-    args = parse_args()
-    try:
-        gallery_id = gallery_id_from_url(args.url)
-        if args.timeout <= 0:
-            raise DownloadError("--timeout 必须大于 0")
-        cookie = args.cookie or os.environ.get("NHENTAI_COOKIE")
-        if args.cookie_file:
-            cookie_path = args.cookie_file.expanduser().resolve()
-            if not cookie_path.is_file():
-                raise DownloadError(f"Cookie 文件不存在: {cookie_path}")
-            cookie = cookie_path.read_text(encoding="utf-8").splitlines()[0].strip()
-        output_hint = args.path.expanduser()
-        output_root = output_hint.parent if output_hint.suffix.lower() == ".pdf" else output_hint
-        output_root.mkdir(parents=True, exist_ok=True)
-        staging_dir = _new_work_dir(output_root, f"nhentai-{gallery_id}")
-        try:
-            images, gallery = download_gallery(gallery_id, staging_dir, args.timeout, cookie)
-            output_path = _output_path(args.path, gallery_id, gallery)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"正在生成 PDF: {output_path}")
-            write_pdf(images, output_path)
-            encrypt_pdf(output_path, args.pdf_password)
-        finally:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        print(f"完成: {output_path}")
-        return 0
-    except (DownloadError, OSError) as exc:
-        print(f"下载失败: {exc}", file=sys.stderr)
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -1,6 +1,7 @@
 name: astrbot_soutu_download
 display_name: soutubot + nhentai 下载工具
-desc: 将 soutubot 搜图 CLI 和 nhentai PDF 下载 CLI 注册为 AstrBot LLM Tools。
-version: v1.0.0
+desc: soutubot 反向搜图与 nhentai PDF 下载，支持详细模式和按匹配度排序展示。
+version: v1.1.0
 author: local-user
 astrbot_version: ">=4.5.7"
+repo: https://github.com/sharmanOwO/astrbot_search_download
